@@ -331,6 +331,8 @@ MAX_FAVORITES_PER_USER = 20
 
 async def add_favorite(user_id: int, repo_full_name: str) -> str:
     repo_full_name = repo_full_name.strip()
+    if not repo_full_name or repo_full_name.count("/") != 1:
+        return "invalid"
 
     async with aiosqlite.connect(settings.database_path) as db:
         await db.execute("BEGIN IMMEDIATE")

@@ -6,6 +6,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from repositories.jobs import (
     add_favorite,
     get_favorites,
+    is_favorite,
     remove_favorite,
 )
 from services.callback_cache import (
@@ -47,6 +48,14 @@ async def add_favorite_handler(callback: CallbackQuery) -> None:
     else:
         await callback.answer("Added to Favorites ⭐")
 
+    if callback.message:
+        await callback.message.edit_reply_markup(
+            reply_markup=repository_action_keyboard(
+                full_name,
+                is_favorite=True,
+            )
+        )
+
 
 @router.message(F.text == "⭐ Favorites")
 async def show_favorites(message: Message) -> None:
@@ -64,23 +73,19 @@ async def show_favorites(message: Message) -> None:
 
     builder = InlineKeyboardBuilder()
 
-    for full_name in favorites:
+    for full_name in favorites[:20]:
         repository_id = store_repository(full_name)
 
         builder.button(
             text=f"📦 {full_name}"[:60],
             callback_data=f"favorite:open:{repository_id}",
         )
-        builder.button(
-            text=f"❌ Remove {full_name}"[:60],
-            callback_data=f"favorite:remove:{repository_id}",
-        )
 
     builder.adjust(1)
 
     await message.answer(
         "⭐ <b>Your Favorites</b>\n\n"
-        "Select a repository to open it, or remove it from your list.",
+        "Select a repository to open its action menu.",
         reply_markup=builder.as_markup(),
         parse_mode="HTML",
     )
@@ -105,10 +110,18 @@ async def open_favorite_handler(callback: CallbackQuery) -> None:
     await callback.answer()
 
     if callback.message:
+        favorite_status = await is_favorite(
+            callback.from_user.id,
+            full_name,
+        ) if callback.from_user else False
+
         await callback.message.answer(
             f"📦 <b>{full_name}</b>\n\n"
             "Choose what you want to download:",
-            reply_markup=repository_action_keyboard(full_name),
+            reply_markup=repository_action_keyboard(
+                full_name,
+                is_favorite=favorite_status,
+            ),
             parse_mode="HTML",
         )
 
@@ -124,7 +137,7 @@ async def remove_favorite_handler(callback: CallbackQuery) -> None:
 
     if not full_name:
         await callback.answer(
-            "Repository session expired. Open Favorites again.",
+            "Repository session expired. Open the repository again.",
             show_alert=True,
         )
         return
@@ -138,4 +151,9 @@ async def remove_favorite_handler(callback: CallbackQuery) -> None:
     await callback.answer("Removed from Favorites.")
 
     if callback.message:
-        await show_favorites(callback.message)
+        await callback.message.edit_reply_markup(
+            reply_markup=repository_action_keyboard(
+                full_name,
+                is_favorite=False,
+            )
+        )

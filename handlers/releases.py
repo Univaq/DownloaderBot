@@ -28,7 +28,11 @@ from services.github import (
     GitHubNotFoundError,
     GitHubRateLimitError,
 )
-from repositories.jobs import create_selection, enqueue_selection
+from repositories.jobs import (
+    create_selection,
+    enqueue_selection,
+    is_favorite,
+)
 from services.callback_cache import store_repository
 
 logger = logging.getLogger(__name__)
@@ -493,9 +497,17 @@ async def select_repository(callback: CallbackQuery):
             "<b>Choose an action below</b>"
         )
 
+    favorite_status = await is_favorite(
+        callback.from_user.id,
+        full_name,
+    )
+
     await callback.message.edit_text(
         message_text,
-        reply_markup=repository_action_keyboard(full_name),
+        reply_markup=repository_action_keyboard(
+            full_name,
+            is_favorite=favorite_status,
+        ),
         parse_mode="HTML",
         disable_web_page_preview=True,
     )
@@ -1262,9 +1274,17 @@ async def back_to_repository(callback: CallbackQuery):
             "<b>Choose an action below</b>"
         )
 
+    favorite_status = await is_favorite(
+        callback.from_user.id,
+        full_name,
+    )
+
     await callback.message.edit_text(
         message_text,
-        reply_markup=repository_action_keyboard(full_name),
+        reply_markup=repository_action_keyboard(
+            full_name,
+            is_favorite=favorite_status,
+        ),
         parse_mode="HTML",
         disable_web_page_preview=True,
     )
@@ -1295,10 +1315,18 @@ async def back_to_releases(callback: CallbackQuery):
             releases = await github.get_releases(owner, repo)
 
         if not releases:
+            favorite_status = await is_favorite(
+                callback.from_user.id,
+                full_name,
+            )
+
             await callback.message.edit_text(
                 f"No releases found for <code>{full_name}</code>.",
                 parse_mode="HTML",
-                reply_markup=repository_action_keyboard(full_name),
+                reply_markup=repository_action_keyboard(
+                    full_name,
+                    is_favorite=favorite_status,
+                ),
             )
             return
 
@@ -1310,9 +1338,32 @@ async def back_to_releases(callback: CallbackQuery):
             parse_mode="HTML",
         )
 
+
+
+
     except GitHubError:
+
         logger.exception("Failed to retrieve repository releases")
-        await callback.message.edit_text(
-            "Failed to retrieve repository releases.",
-            reply_markup=repository_action_keyboard(full_name),
+
+        favorite_status = await is_favorite(
+
+            callback.from_user.id,
+
+            full_name,
+
         )
+
+        await callback.message.edit_text(
+
+            "Failed to retrieve repository releases.",
+
+            reply_markup=repository_action_keyboard(
+
+                full_name,
+
+                is_favorite=favorite_status,
+
+            ),
+
+        )
+
