@@ -33,12 +33,19 @@ async def add_favorite_handler(callback: CallbackQuery) -> None:
         )
         return
 
-    added = await add_favorite(callback.from_user.id, full_name)
+    result = await add_favorite(callback.from_user.id, full_name)
 
-    if added:
-        await callback.answer("Added to Favorites ⭐")
-    else:
+    if result == "full":
+        await callback.answer(
+            "Favorites is full (20 repositories). Remove one first.",
+            show_alert=True,
+        )
+        return
+
+    if result == "exists":
         await callback.answer("Already in Favorites ⭐")
+    else:
+        await callback.answer("Added to Favorites ⭐")
 
 
 @router.message(F.text == "⭐ Favorites")

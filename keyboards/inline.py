@@ -50,11 +50,19 @@ def repository_keyboard(repositories, search_token: str):
 
 
 
-def repository_action_keyboard(full_name: str):
+def repository_action_keyboard(
+    full_name: str,
+    is_favorite: bool = False,
+):
     builder = InlineKeyboardBuilder()
     repository_id = store_repository(full_name)
     search_token = get_repository_search(repository_id)
-
+    favorite_action = "remove" if is_favorite else "add"
+    favorite_text = (
+        "❌ Remove from Favorites"
+        if is_favorite
+        else "⭐ Add to Favorites"
+    )
     builder.button(
         text="📥 Download Source Code",
         callback_data=_validate_callback_data(
@@ -73,10 +81,11 @@ def repository_action_keyboard(full_name: str):
             f"choice:readme:{repository_id}"
         ),
     )
+
     builder.button(
-        text="⭐ Add to Favorites",
+        text=favorite_text,
         callback_data=_validate_callback_data(
-            f"favorite:add:{repository_id}"
+            f"favorite:{favorite_action}:{repository_id}"
         ),
     )
 

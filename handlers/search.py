@@ -14,7 +14,7 @@ from services.callback_cache import (
     get_search_results,
 )
 from services.callback_cache import store_search_results
-
+from repositories.jobs import is_favorite
 from keyboards.inline import repository_keyboard
 from services.github import (
     GitHubService,
@@ -155,11 +155,17 @@ async def perform_repository_search(
 
                 from keyboards.inline import repository_action_keyboard
 
+                favorite_status = await is_favorite(
+                    user.id,
+                    repository["full_name"],
+                )
+
                 await status_message.edit_text(
                     f"📦 <b>{repository['full_name']}</b>\n\n"
                     "Choose what you want to download:",
                     reply_markup=repository_action_keyboard(
-                        repository["full_name"]
+                        repository["full_name"],
+                        is_favorite=favorite_status,
                     ),
                     parse_mode="HTML",
                 )
