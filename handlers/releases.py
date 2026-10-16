@@ -1,26 +1,24 @@
 
+import html
 import logging
-
 import re
-from urllib.parse import urlparse
-
+from datetime import datetime
 
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import BufferedInputFile, CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-import html
-from datetime import datetime
+
 from keyboards.inline import (
     repository_action_keyboard,
     releases_keyboard,
-    download_keyboard,
-    readme_download_keyboard,
 )
 from services.callback_cache import (
     get_repository,
     get_release,
     store_readme,
     get_readme,
+    store_repository,
 )
 from services.github import (
     GitHubService,
@@ -33,11 +31,9 @@ from repositories.jobs import (
     enqueue_selection,
     is_favorite,
 )
-from services.callback_cache import store_repository
 
 logger = logging.getLogger(__name__)
 router = Router(name="releases")
-
 
 
 def back_to_repository_keyboard(full_name: str):
@@ -72,6 +68,7 @@ async def show_github_error(
     else:
         await callback.answer(error_message, show_alert=True)
 
+
 def format_repository_date(value: str | None) -> str:
     if not value:
         return "Unknown"
@@ -94,7 +91,6 @@ def clean_readme_content(content: str) -> str:
         flags=re.DOTALL,
     )
 
-    # Remove HTML images and SVG elements.
     content = re.sub(
         r"<img\b[^>]*>",
         "",
@@ -108,7 +104,6 @@ def clean_readme_content(content: str) -> str:
         flags=re.IGNORECASE | re.DOTALL,
     )
 
-    # Remove Markdown images.
     content = re.sub(
         r"!\[[^\]]*\]\([^)]*\)",
         "",
@@ -120,14 +115,12 @@ def clean_readme_content(content: str) -> str:
         content,
     )
 
-    # Remove empty Markdown links.
     content = re.sub(
         r"\[\s*\]\([^)]*\)",
         "",
         content,
     )
 
-    # Remove HTML tags while preserving their text.
     content = re.sub(
         r"<br\s*/?>",
         "\n",
@@ -142,7 +135,6 @@ def clean_readme_content(content: str) -> str:
     )
     content = re.sub(r"<[^>]+>", "", content)
 
-    # Remove reference definitions used for images or badges.
     content = re.sub(
         r"^\s*\[[^\]]+\]:\s*\S+.*$",
         "",
@@ -150,12 +142,10 @@ def clean_readme_content(content: str) -> str:
         flags=re.MULTILINE,
     )
 
-    # Normalize whitespace.
     content = re.sub(r"[ \t]+\n", "\n", content)
     content = re.sub(r"\n{3,}", "\n\n", content)
 
     return content.strip()
-
 
 
 def format_repository_card(
@@ -238,9 +228,7 @@ def format_repository_card(
     )
 
 
-
 TELEGRAM_MESSAGE_LIMIT = 3500
-
 
 
 def format_markdown_inline(text: str) -> str:
@@ -262,7 +250,6 @@ def format_markdown_inline(text: str) -> str:
         groups = match.groups()
 
         if groups[0] is not None:
-            # Omit Markdown images.
             pass
         elif groups[1] is not None:
             label = groups[1]
@@ -289,7 +276,6 @@ def format_markdown_inline(text: str) -> str:
 
     parts.append(html.escape(text[position:]))
     return "".join(parts)
-
 
 
 def split_readme_preview(content: str) -> list[str]:
@@ -435,13 +421,11 @@ def readme_preview_keyboard(
 
     return builder.as_markup()
 
+
 @router.callback_query(F.data.startswith("repo:"))
 async def select_repository(callback: CallbackQuery):
     if not callback.data or callback.message is None:
-        await callback.answer(
-            "Invalid request.",
-            show_alert=True,
-        )
+        await callback.answer("Invalid request.", show_alert=True)
         return
 
     token = callback.data.removeprefix("repo:")
@@ -462,10 +446,7 @@ async def select_repository(callback: CallbackQuery):
         async with GitHubService() as github:
             repository = await github.get_repository(owner, repo)
 
-        message_text = format_repository_card(
-            full_name,
-            repository,
-        )
+        message_text = format_repository_card(full_name, repository)
 
     except GitHubRateLimitError:
         message_text = (
@@ -516,10 +497,7 @@ async def select_repository(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("choice:src:"))
 async def choose_source_code(callback: CallbackQuery):
     if not callback.data or callback.message is None:
-        await callback.answer(
-            "Invalid request.",
-            show_alert=True,
-        )
+        await callback.answer("Invalid request.", show_alert=True)
         return
 
     token = callback.data.removeprefix("choice:src:")
@@ -539,10 +517,7 @@ async def choose_source_code(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("choice:rel:"))
 async def choose_releases(callback: CallbackQuery):
     if not callback.data or callback.message is None:
-        await callback.answer(
-            "Invalid request.",
-            show_alert=True,
-        )
+        await callback.answer("Invalid request.", show_alert=True)
         return
 
     token = callback.data.removeprefix("choice:rel:")
@@ -617,7 +592,6 @@ async def choose_releases(callback: CallbackQuery):
             "❌ An unexpected error occurred. Please try again later.",
             full_name,
         )
-
 
 
 async def send_source_selection(
@@ -701,8 +675,6 @@ async def send_source_selection(
     )
 
 
-
-
 def source_selection_keyboard(selection_id: str, repository_id: str):
     builder = InlineKeyboardBuilder()
 
@@ -719,14 +691,114 @@ def source_selection_keyboard(selection_id: str, repository_id: str):
     return builder.as_markup()
 
 
+ASSETS_PER_PAGE = 10
+
+
+async def _render_release_assets(
+    callback: CallbackQuery,
+    full_name: str,
+    tag: str,
+    assets: list[dict],
+    release_token: str,
+    page: int = 0,
+) -> None:
+    if callback.message is None:
+        return
+
+    total_pages = max(
+        1,
+        (len(assets) + ASSETS_PER_PAGE - 1) // ASSETS_PER_PAGE,
+    )
+    page = max(0, min(page, total_pages - 1))
+
+    start = page * ASSETS_PER_PAGE
+    page_assets = assets[start : start + ASSETS_PER_PAGE]
+
+    repository_id = store_repository(full_name)
+    builder = InlineKeyboardBuilder()
+
+    for asset in page_assets:
+        if not isinstance(asset, dict):
+            continue
+
+        download_url = asset.get("download_url")
+        file_name = asset.get("name")
+
+        if not download_url or not file_name:
+            continue
+
+        selection_id = await create_selection(
+            user_id=callback.from_user.id,
+            chat_id=callback.message.chat.id,
+            download_url=download_url,
+            file_name=file_name,
+            job_type="asset",
+        )
+
+        size_mb = (asset.get("size") or 0) / (1024 * 1024)
+
+        builder.button(
+            text=f"⬇️ {file_name} ({size_mb:.1f} MB)"[:60],
+            callback_data=f"get:{selection_id}",
+        )
+
+    nav_count = 0
+
+    if total_pages > 1:
+        if page > 0:
+            builder.button(
+                text="⬅️ Previous",
+                callback_data=f"assets_page:{release_token}:{page - 1}",
+            )
+            nav_count += 1
+
+        builder.button(
+            text=f"📄 {page + 1}/{total_pages}",
+            callback_data=f"assets_info:{release_token}:{page}",
+        )
+        nav_count += 1
+
+        if page < total_pages - 1:
+            builder.button(
+                text="Next ➡️",
+                callback_data=f"assets_page:{release_token}:{page + 1}",
+            )
+            nav_count += 1
+
+    builder.button(
+        text="⬅️ Back to Releases",
+        callback_data=f"back:releases:{repository_id}",
+    )
+
+    if nav_count:
+        builder.adjust(*([1] * len(page_assets)), nav_count, 1)
+    else:
+        builder.adjust(1)
+
+    text = (
+        f"🚀 <b>Release Assets</b>\n"
+        f"Repository: <code>{html.escape(full_name)}</code>\n"
+        f"Version: <code>{html.escape(tag)}</code>\n\n"
+        f"Files: {len(assets)}\n"
+        f"Select a file to download:"
+    )
+
+    if total_pages > 1:
+        text += f"\nPage {page + 1} of {total_pages}"
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML",
+    )
+
+
+
 
 @router.callback_query(F.data.startswith("rel:"))
 async def release_selected(callback: CallbackQuery):
     if not callback.data or callback.message is None:
-        await callback.answer(
-            "Invalid request.",
-            show_alert=True,
-        )
+        await callback.answer("Invalid request.", show_alert=True)
         return
 
     token = callback.data.removeprefix("rel:")
@@ -742,10 +814,7 @@ async def release_selected(callback: CallbackQuery):
     full_name, tag = release_info
 
     if full_name.count("/") != 1 or not tag:
-        await callback.answer(
-            "Invalid release selection.",
-            show_alert=True,
-        )
+        await callback.answer("Invalid release selection.", show_alert=True)
         return
 
     await callback.answer()
@@ -756,120 +825,86 @@ async def release_selected(callback: CallbackQuery):
         async with GitHubService() as github:
             releases = await github.get_releases(owner, repo)
 
+        release = next(
+            (
+                item for item in releases
+                if item.get("tag_name") == tag
+            ),
+            None,
+        )
+
+        if release is None:
+            await callback.message.edit_text(
+                "❌ This release could not be found.",
+                reply_markup=back_to_repository_keyboard(full_name),
+            )
+            return
+
+        assets = [
+            asset
+            for asset in release.get("assets", [])
+            if isinstance(asset, dict)
+            and asset.get("name")
+            and asset.get("download_url")
+        ]
+
+        if not assets:
+            await callback.message.edit_text(
+                f"🚀 <b>Release:</b> <code>{html.escape(tag)}</code>\n\n"
+                "This release has no downloadable assets.",
+                reply_markup=back_to_repository_keyboard(full_name),
+                parse_mode="HTML",
+            )
+            return
+
+        await _render_release_assets(
+            callback=callback,
+            full_name=full_name,
+            tag=tag,
+            assets=assets,
+            release_token=token,
+            page=0,
+        )
+
     except GitHubNotFoundError:
         await show_github_error(
             callback,
             "❌ Repository or release not found.",
+            full_name,
         )
-        return
-
     except GitHubRateLimitError:
         await show_github_error(
             callback,
             "⏳ GitHub rate limit reached. Please try again later.",
+            full_name,
         )
-        return
-
     except GitHubError:
         logger.exception("Failed to retrieve release assets")
         await show_github_error(
             callback,
             "❌ Failed to retrieve release information.",
+            full_name,
         )
-        return
-
     except Exception:
-        logger.exception("Unexpected error while retrieving release")
+        logger.exception("Unexpected error while retrieving release assets")
         await show_github_error(
             callback,
             "❌ An unexpected error occurred. Please try again later.",
+            full_name,
         )
-        return
-
-    release = next(
-        (
-            item
-            for item in releases
-            if item.get("tag_name") == tag
-        ),
-        None,
-    )
-
-    if release is None:
-        await callback.message.edit_text(
-            "❌ This release could not be found.",
-            reply_markup=back_to_repository_keyboard(full_name),
-        )
-        return
-
-    selections = []
-
-    for asset in release.get("assets", [])[:10]:
-        selection_id = await create_selection(
-            user_id=callback.from_user.id,
-            chat_id=callback.message.chat.id,
-            download_url=asset["download_url"],
-            file_name=asset["name"],
-            job_type="asset",
-        )
-
-        size_mb = asset.get("size", 0) / (1024 * 1024)
-
-        selections.append(
-            (
-                selection_id,
-                f"⬇️ {asset['name']} ({size_mb:.1f} MB)",
-            )
-        )
-
-    if not selections:
-        await callback.message.edit_text(
-            f"🚀 <b>Release:</b> <code>{tag}</code>\n\n"
-            "This release has no downloadable assets.",
-            reply_markup=back_to_repository_keyboard(full_name),
-            parse_mode="HTML",
-        )
-        return
-
-    repository_id = store_repository(full_name)
-
-    builder = InlineKeyboardBuilder()
-
-    for selection_id, label in selections:
-        builder.button(
-            text=label[:60],
-            callback_data=f"get:{selection_id}",
-        )
-
-    builder.button(
-        text="⬅️ Back to Releases",
-        callback_data=f"back:releases:{repository_id}",
-    )
-
-    builder.adjust(1)
-
-    await callback.message.edit_text(
-        f"🚀 <b>Release Assets</b>\n"
-        f"Repository: <code>{full_name}</code>\n"
-        f"Version: <code>{tag}</code>\n\n"
-        "Select a file to download:",
-        reply_markup=builder.as_markup(),
-        parse_mode="HTML",
-    )
 
 
 @router.callback_query(F.data.startswith("get:"))
 async def enqueue_download(callback: CallbackQuery):
     if not callback.data or callback.message is None:
-        await callback.answer(
-            "Invalid request.",
-            show_alert=True,
-        )
+        await callback.answer("Invalid request.", show_alert=True)
         return
 
     selection_id = callback.data.removeprefix("get:")
+    previous_message = callback.message
 
-    queue_message = await callback.message.answer(
+    # این پیام باید باقی بماند تا worker بتواند آن را به‌روزرسانی کند.
+    queue_message = await previous_message.answer(
         "⏳ Download request added to the queue."
     )
 
@@ -919,33 +954,101 @@ async def enqueue_download(callback: CallbackQuery):
 
         return
 
+    # فقط بعد از ثبت موفق دانلود، پیام قبلی ربات را حذف می‌کنیم.
+    # پیام صف حذف نمی‌شود و شناسه‌های آن در دیتابیس باقی می‌مانند.
+    try:
+        await previous_message.delete()
+    except TelegramBadRequest:
+        logger.warning(
+            "Could not delete previous download menu message "
+            "(chat_id=%s, message_id=%s)",
+            previous_message.chat.id,
+            previous_message.message_id,
+            exc_info=True,
+        )
+
     await callback.answer("Download added to the queue.")
 
+README_FILES_PER_PAGE = 10
 
 
+def readme_files_keyboard(
+    token: str,
+    files: list[dict],
+    page: int = 0,
+):
+    builder = InlineKeyboardBuilder()
 
+    total_pages = max(
+        1,
+        (len(files) + README_FILES_PER_PAGE - 1)
+        // README_FILES_PER_PAGE,
+    )
+    page = max(0, min(page, total_pages - 1))
+
+    start = page * README_FILES_PER_PAGE
+    current_files = files[start:start + README_FILES_PER_PAGE]
+
+    for index, file in enumerate(current_files, start=start):
+        name = file.get("name") or file.get("path") or "README"
+        builder.button(
+            text=f"📄 {name}"[:60],
+            callback_data=f"readme_lang:{token}:{index}",
+        )
+
+    nav_count = 0
+
+    if total_pages > 1:
+        if page > 0:
+            builder.button(
+                text="⬅️ Previous",
+                callback_data=f"readme_page:{token}:{page - 1}",
+            )
+            nav_count += 1
+
+        builder.button(
+            text=f"📄 Page {page + 1}/{total_pages}",
+            callback_data=f"readme_info:{token}:{page}",
+        )
+        nav_count += 1
+
+        if page < total_pages - 1:
+            builder.button(
+                text="Next ➡️",
+                callback_data=f"readme_page:{token}:{page + 1}",
+            )
+            nav_count += 1
+
+    builder.button(
+        text="⬅️ Back to Repository",
+        callback_data=f"back:repo:{token}",
+    )
+
+    if nav_count:
+        builder.adjust(
+            *([1] * len(current_files)),
+            nav_count,
+            1,
+        )
+    else:
+        builder.adjust(1)
+
+    return builder.as_markup()
 
 @router.callback_query(F.data.startswith("choice:readme:"))
 async def choose_readme(callback: CallbackQuery):
     if not callback.data or not callback.message:
-        await callback.answer(
-            "Invalid request.",
-            show_alert=True,
-        )
+        await callback.answer("Invalid request.", show_alert=True)
         return
 
     token = callback.data.removeprefix("choice:readme:")
     full_name = get_repository(token)
 
     if not full_name or full_name.count("/") != 1:
-        await callback.answer(
-            "Please search again.",
-            show_alert=True,
-        )
+        await callback.answer("Please search again.", show_alert=True)
         return
 
     await callback.answer()
-
     message = callback.message
 
     try:
@@ -981,12 +1084,18 @@ async def choose_readme(callback: CallbackQuery):
             text="⬅️ Back to Repository",
             callback_data=f"back:repo:{token}",
         )
-
         builder.adjust(1)
 
         await message.edit_text(
-            "Choose a README file:",
-            reply_markup=builder.as_markup(),
+            f"📄 Choose a README file\n"
+            f"Repository: {html.escape(full_name)}\n\n"
+            f"Found {len(files)} README files.",
+            reply_markup=readme_files_keyboard(
+                token=token,
+                files=files,
+                page=0,
+            ),
+            parse_mode="HTML",
         )
 
     except GitHubNotFoundError:
@@ -1014,6 +1123,7 @@ async def choose_readme(callback: CallbackQuery):
             "An unexpected error occurred.",
             reply_markup=back_to_repository_keyboard(full_name),
         )
+
 
 async def show_readme_format_options(
     message,
@@ -1044,7 +1154,6 @@ async def show_readme_format_options(
     if len(content) > preview_limit:
         last_newline = preview_content.rfind("\n")
         last_space = preview_content.rfind(" ")
-
         cut_position = max(last_newline, last_space)
 
         if cut_position > 300:
@@ -1064,7 +1173,8 @@ async def show_readme_format_options(
     )
 
     text = (
-        f"📄 <b>README Preview</b> ( <code>{html.escape(readme_file['name'])}</code> )\n\n"
+        f"📄 <b>README Preview</b> "
+        f"(<code>{html.escape(readme_file['name'])}</code>)\n\n"
         f"{preview_text}"
     )
 
@@ -1075,6 +1185,97 @@ async def show_readme_format_options(
         disable_web_page_preview=True,
     )
 
+@router.callback_query(F.data.startswith("readme_page:"))
+async def change_readme_page(callback: CallbackQuery):
+    if not callback.data or callback.message is None:
+        await callback.answer("Invalid request.", show_alert=True)
+        return
+
+    try:
+        _, token, page_text = callback.data.split(":", 2)
+        page = int(page_text)
+        if page < 0:
+            raise ValueError
+    except ValueError:
+        await callback.answer("Invalid page.", show_alert=True)
+        return
+
+    full_name = get_repository(token)
+
+    if not full_name or full_name.count("/") != 1:
+        await callback.answer(
+            "This selection has expired. Please search again.",
+            show_alert=True,
+        )
+        return
+
+    await callback.answer()
+
+    try:
+        owner, repo = full_name.split("/", 1)
+
+        async with GitHubService() as github:
+            files = await github.get_readme_files(owner, repo)
+
+        if not files:
+            await callback.message.edit_text(
+                "No README files found.",
+                reply_markup=back_to_repository_keyboard(full_name),
+            )
+            return
+
+        await callback.message.edit_text(
+            f"📄 Choose a README file\n"
+            f"Repository: {html.escape(full_name)}\n\n"
+            f"Found {len(files)} README files.",
+            reply_markup=readme_files_keyboard(
+                token=token,
+                files=files,
+                page=page,
+            ),
+            parse_mode="HTML",
+        )
+
+    except GitHubRateLimitError:
+        await callback.message.edit_text(
+            "GitHub rate limit reached. Please try again later.",
+            reply_markup=back_to_repository_keyboard(full_name),
+        )
+    except GitHubError:
+        logger.exception("Failed to load README page")
+        await callback.message.edit_text(
+            "Failed to retrieve README files.",
+            reply_markup=back_to_repository_keyboard(full_name),
+        )
+    except Exception:
+        logger.exception("Unexpected error while changing README page")
+        await callback.message.edit_text(
+            "An unexpected error occurred.",
+            reply_markup=back_to_repository_keyboard(full_name),
+        )
+
+
+@router.callback_query(F.data.startswith("readme_info:"))
+async def readme_page_info(callback: CallbackQuery):
+    if not callback.data:
+        await callback.answer()
+        return
+
+    try:
+        _, token, page_text = callback.data.split(":", 2)
+        page = int(page_text)
+    except ValueError:
+        await callback.answer("Invalid page.", show_alert=True)
+        return
+
+    if page < 0 or get_repository(token) is None:
+        await callback.answer(
+            "Invalid or expired page.",
+            show_alert=True,
+        )
+        return
+
+    await callback.answer(f"Page {page + 1}")
 
 @router.callback_query(F.data.startswith("readme_lang:"))
 async def choose_readme_language(callback: CallbackQuery):
@@ -1163,7 +1364,10 @@ async def choose_readme_format(callback: CallbackQuery):
     info = get_readme(readme_id)
 
     if not info:
-        await callback.answer("Please select the README again.", show_alert=True)
+        await callback.answer(
+            "Please select the README again.",
+            show_alert=True,
+        )
         return
 
     full_name, path, _ = info
@@ -1172,9 +1376,7 @@ async def choose_readme_format(callback: CallbackQuery):
         await callback.answer("Invalid repository.", show_alert=True)
         return
 
-
     await callback.answer()
-
     message = callback.message
 
     try:
@@ -1239,7 +1441,6 @@ async def choose_readme_format(callback: CallbackQuery):
         )
 
 
-
 @router.callback_query(F.data.startswith("back:repo:"))
 async def back_to_repository(callback: CallbackQuery):
     if not callback.data or callback.message is None:
@@ -1267,7 +1468,10 @@ async def back_to_repository(callback: CallbackQuery):
         message_text = format_repository_card(full_name, repository)
 
     except GitHubError:
-        logger.exception("Failed to load repository details: %s", full_name)
+        logger.exception(
+            "Failed to load repository details: %s",
+            full_name,
+        )
         message_text = (
             f"📦 <b>{html.escape(full_name)}</b>\n\n"
             "Repository details are temporarily unavailable.\n\n"
@@ -1338,32 +1542,258 @@ async def back_to_releases(callback: CallbackQuery):
             parse_mode="HTML",
         )
 
-
-
-
     except GitHubError:
-
         logger.exception("Failed to retrieve repository releases")
 
         favorite_status = await is_favorite(
-
             callback.from_user.id,
-
             full_name,
-
         )
 
         await callback.message.edit_text(
-
             "Failed to retrieve repository releases.",
-
             reply_markup=repository_action_keyboard(
-
                 full_name,
-
                 is_favorite=favorite_status,
-
             ),
-
         )
 
+@router.callback_query(F.data.startswith("releases_page:"))
+async def change_releases_page(callback: CallbackQuery):
+    if not callback.data or callback.message is None:
+        await callback.answer("Invalid request.", show_alert=True)
+        return
+
+    try:
+        _, token, page_text = callback.data.split(":", 2)
+        page = int(page_text)
+    except (ValueError, TypeError):
+        await callback.answer("Invalid page selection.", show_alert=True)
+        return
+
+    if page < 0:
+        await callback.answer("Invalid page number.", show_alert=True)
+        return
+
+    full_name = get_repository(token)
+
+    if not full_name or full_name.count("/") != 1:
+        await callback.answer(
+            "This selection has expired. Please search again.",
+            show_alert=True,
+        )
+        return
+
+    await callback.answer()
+
+    owner, repo = full_name.split("/", 1)
+
+    try:
+        async with GitHubService() as github:
+            releases = await github.get_releases(owner, repo)
+
+        if not releases:
+            await callback.message.edit_text(
+                f"No releases found for <code>{html.escape(full_name)}</code>.",
+                reply_markup=back_to_repository_keyboard(full_name),
+                parse_mode="HTML",
+            )
+            return
+
+        # releases_keyboard خودش شماره صفحه را بررسی و اصلاح می‌کند.
+        await callback.message.edit_text(
+            f"🚀 <b>Available Releases</b>\n"
+            f"<code>{html.escape(full_name)}</code>\n\n"
+            "Select a release:",
+            reply_markup=releases_keyboard(
+                full_name,
+                releases,
+                page=page,
+            ),
+            parse_mode="HTML",
+        )
+
+    except GitHubNotFoundError:
+        await show_github_error(
+            callback,
+            "❌ Repository not found.",
+            full_name,
+        )
+
+    except GitHubRateLimitError:
+        await show_github_error(
+            callback,
+            "⏳ GitHub rate limit reached. Please try again later.",
+            full_name,
+        )
+
+    except GitHubError:
+        logger.exception(
+            "Failed to load releases page for %s",
+            full_name,
+        )
+        await show_github_error(
+            callback,
+            "❌ Failed to retrieve repository releases.",
+            full_name,
+        )
+
+    except Exception:
+        logger.exception(
+            "Unexpected error while changing releases page for %s",
+            full_name,
+        )
+        await show_github_error(
+            callback,
+            "❌ An unexpected error occurred. Please try again later.",
+            full_name,
+        )
+
+
+@router.callback_query(F.data.startswith("releases_info:"))
+async def releases_page_info(callback: CallbackQuery):
+    if not callback.data:
+        await callback.answer("Invalid request.", show_alert=True)
+        return
+
+    try:
+        _, token, page_text = callback.data.split(":", 2)
+        page = int(page_text)
+    except (ValueError, TypeError):
+        await callback.answer("Invalid page selection.", show_alert=True)
+        return
+
+    if page < 0:
+        await callback.answer("Invalid page number.", show_alert=True)
+        return
+
+    if get_repository(token) is None:
+        await callback.answer(
+            "This selection has expired. Please search again.",
+            show_alert=True,
+        )
+        return
+
+    # دکمهٔ شماره صفحه فقط اطلاعات می‌دهد؛ لازم نیست پیام ویرایش شود.
+    await callback.answer(f"Page {page + 1}")
+
+
+@router.callback_query(F.data.startswith("assets_page:"))
+async def change_assets_page(callback: CallbackQuery):
+    if not callback.data or callback.message is None:
+        await callback.answer("Invalid request.", show_alert=True)
+        return
+
+    try:
+        _, token, page_text = callback.data.split(":", 2)
+        page = int(page_text)
+        if page < 0:
+            raise ValueError
+    except ValueError:
+        await callback.answer("Invalid page.", show_alert=True)
+        return
+
+    release_info = get_release(token)
+
+    if release_info is None:
+        await callback.answer(
+            "This release selection has expired. Please search again.",
+            show_alert=True,
+        )
+        return
+
+    full_name, tag = release_info
+
+    if full_name.count("/") != 1:
+        await callback.answer("Invalid release selection.", show_alert=True)
+        return
+
+    await callback.answer()
+
+    owner, repo = full_name.split("/", 1)
+
+    try:
+        async with GitHubService() as github:
+            releases = await github.get_releases(owner, repo)
+
+        release = next(
+            (
+                item for item in releases
+                if item.get("tag_name") == tag
+            ),
+            None,
+        )
+
+        if release is None:
+            await show_github_error(
+                callback,
+                "❌ This release could not be found.",
+                full_name,
+            )
+            return
+
+        assets = [
+            asset
+            for asset in release.get("assets", [])
+            if isinstance(asset, dict)
+            and asset.get("name")
+            and asset.get("download_url")
+        ]
+
+        if not assets:
+            await show_github_error(
+                callback,
+                "This release has no downloadable assets.",
+                full_name,
+            )
+            return
+
+        await _render_release_assets(
+            callback=callback,
+            full_name=full_name,
+            tag=tag,
+            assets=assets,
+            release_token=token,
+            page=page,
+        )
+
+    except GitHubRateLimitError:
+        await show_github_error(
+            callback,
+            "⏳ GitHub rate limit reached. Please try again later.",
+            full_name,
+        )
+    except GitHubError:
+        logger.exception("Failed to change release assets page")
+        await show_github_error(
+            callback,
+            "❌ Failed to retrieve release assets.",
+            full_name,
+        )
+    except Exception:
+        logger.exception("Unexpected error while changing assets page")
+        await show_github_error(
+            callback,
+            "❌ An unexpected error occurred.",
+            full_name,
+        )
+
+
+@router.callback_query(F.data.startswith("assets_info:"))
+async def assets_page_info(callback: CallbackQuery):
+    if not callback.data:
+        await callback.answer()
+        return
+
+    try:
+        _, token, page_text = callback.data.split(":", 2)
+        page = int(page_text)
+    except ValueError:
+        await callback.answer("Invalid page.", show_alert=True)
+        return
+
+    if page < 0 or get_release(token) is None:
+        await callback.answer("Invalid or expired page.", show_alert=True)
+        return
+
+    await callback.answer(f"Page {page + 1}")

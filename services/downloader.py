@@ -1,12 +1,11 @@
 
 import asyncio
+import logging
 import os
 import tempfile
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
-
-import logging
 
 import aiofiles
 import httpx
@@ -38,7 +37,6 @@ logger = logging.getLogger(__name__)
 
 def is_allowed_github_url(url: str) -> bool:
     """Validate a GitHub download URL."""
-
     try:
         parsed = urlparse(url)
 
@@ -59,7 +57,6 @@ async def download_to_temp_once(
     progress_callback: ProgressCallback | None = None,
 ) -> Path:
     """Download a file to a temporary path with progress reporting."""
-
     if not is_allowed_github_url(url):
         raise ValueError("The download URL is not allowed.")
 
@@ -133,31 +130,41 @@ async def download_to_temp_once(
                     response.raise_for_status()
 
                     if response.status_code != 200:
-                        raise ValueError("The download server returned an unexpected status.")
+                        raise ValueError(
+                            "The download server returned an unexpected status."
+                        )
 
-                    content_type = response.headers.get("content-type", "")
+                    content_type = response.headers.get(
+                        "content-type",
+                        "",
+                    )
+
                     if content_type.lower().startswith("text/html"):
-                        raise ValueError("The download server returned an HTML page.")
+                        raise ValueError(
+                            "The download server returned an HTML page."
+                        )
 
                     content_length = response.headers.get("content-length")
 
                     if content_length is not None:
                         if not content_length.isdigit():
-                            raise ValueError("The download server returned an invalid file size.")
+                            raise ValueError(
+                                "The download server returned an invalid file size."
+                            )
 
                         total_size = int(content_length)
 
                         if total_size > max_size:
-                            raise ValueError("The file exceeds the configured download limit.")
+                            raise ValueError(
+                                "The file exceeds the configured download limit."
+                            )
                     else:
                         total_size = None
 
                     downloaded = 0
 
                     async with aiofiles.open(path, "wb") as output:
-                        async for chunk in response.aiter_bytes(
-                            CHUNK_SIZE
-                        ):
+                        async for chunk in response.aiter_bytes(CHUNK_SIZE):
                             if not chunk:
                                 continue
 
@@ -172,11 +179,12 @@ async def download_to_temp_once(
 
                             if progress_callback is not None:
                                 try:
-                                    await progress_callback(downloaded, total_size)
+                                    await progress_callback(
+                                        downloaded,
+                                        total_size,
+                                    )
                                 except Exception:
-                                    import logging
-
-                                    logging.getLogger(__name__).debug(
+                                    logger.debug(
                                         "Download progress callback failed",
                                         exc_info=True,
                                     )
@@ -205,7 +213,6 @@ async def download_to_temp(
     progress_callback: ProgressCallback | None = None,
 ) -> Path:
     """Download a file with retries for transient network errors."""
-
     for attempt in range(1, MAX_DOWNLOAD_ATTEMPTS + 1):
         try:
             return await download_to_temp_once(
@@ -224,10 +231,11 @@ async def download_to_temp(
 
             await asyncio.sleep(RETRY_DELAY_SECONDS * attempt)
 
+    raise RuntimeError("Download failed after all retry attempts.")
+
 
 async def delete_temp_file(path: Path) -> None:
     """Delete a temporary file belonging to this bot."""
-
     root = settings.downloads_dir.resolve()
     target = Path(os.path.abspath(path))
 
@@ -241,7 +249,9 @@ async def delete_temp_file(path: Path) -> None:
         raise ValueError("The temporary file path is invalid.")
 
     if target.is_symlink():
-        raise ValueError("Symbolic links cannot be deleted as temporary files.")
+        raise ValueError(
+            "Symbolic links cannot be deleted as temporary files."
+        )
 
     await asyncio.to_thread(
         target.unlink,

@@ -1,5 +1,6 @@
 
 from collections import OrderedDict
+from copy import deepcopy
 import secrets
 
 
@@ -11,13 +12,13 @@ _readme_cache: OrderedDict[
     str, tuple[str, str, str | None]
 ] = OrderedDict()
 _search_cache: OrderedDict[str, list[dict]] = OrderedDict()
-_repository_search_cache: dict[str, str] = {}
+
+_repository_search_cache: OrderedDict[str, str] = OrderedDict()
 _repository_token_by_name: dict[str, str] = {}
 
-def _store(
-    cache: OrderedDict,
-    value,
-) -> str:
+
+def _store(cache: OrderedDict, value) -> str:
+    """Store a value and return a short, unique token."""
     token = secrets.token_urlsafe(6)
 
     while token in cache:
@@ -27,15 +28,47 @@ def _store(
     cache.move_to_end(token)
 
     while len(cache) > MAX_CACHE_ITEMS:
-        cache.popitem(last=False)
+        expired_token, expired_value = cache.popitem(last=False)
+
+        if cache is _repository_cache:
+            full_name = expired_value
+
+            if _repository_token_by_name.get(full_name) == expired_token:
+                _repository_token_by_name.pop(full_name, None)
+
+            _repository_search_cache.pop(expired_token, None)
+
+        elif cache is _search_cache:
+            expired_links = [
+                repo_token
+                for repo_token, search_token
+                in _repository_search_cache.items()
+                if search_token == expired_token
+            ]
+
+            for repo_token in expired_links:
+                _repository_search_cache.pop(repo_token, None)
 
     return token
+
+
+def _get(cache: OrderedDict, token: str):
+    """Retrieve a cached value and refresh its LRU position."""
+    value = cache.get(token)
+
+    if value is not None:
+        cache.move_to_end(token)
+
+    return value
 
 
 def store_repository(full_name: str) -> str:
     existing_token = _repository_token_by_name.get(full_name)
 
-    if existing_token and _repository_cache.get(existing_token) == full_name:
+    if (
+        existing_token
+        and _repository_cache.get(existing_token) == full_name
+    ):
         _repository_cache.move_to_end(existing_token)
         return existing_token
 
@@ -45,7 +78,7 @@ def store_repository(full_name: str) -> str:
 
 
 def get_repository(token: str) -> str | None:
-    return _repository_cache.get(token)
+    return _get(_repository_cache, token)
 
 
 def store_release(full_name: str, tag: str) -> str:
@@ -53,7 +86,7 @@ def store_release(full_name: str, tag: str) -> str:
 
 
 def get_release(token: str) -> tuple[str, str] | None:
-    return _release_cache.get(token)
+    return _get(_release_cache, token)
 
 
 def store_readme(
@@ -70,33 +103,54 @@ def store_readme(
 def get_readme(
     token: str,
 ) -> tuple[str, str, str | None] | None:
-    return _readme_cache.get(token)
+    return _get(_readme_cache, token)
+
 
 def store_search_results(repositories: list[dict]) -> str:
-    token = _store(_search_cache, repositories)
-    return token
+    """Cache the complete result list for use across all pages."""
+    return _store(_search_cache, deepcopy(repositories))
 
 
 def get_search_results(token: str) -> list[dict] | None:
-    results = _search_cache.get(token)
+    """Return cached results without exposing the cache's internal list."""
+    repositories = _get(_search_cache, token)
 
-    if results is None:
+    if repositories is None:
         return None
 
-    _search_cache.move_to_end(token)
-    return results
+    return deepcopy(repositories)
 
 
 def link_repository_to_search(
     repository_token: str,
     search_token: str,
 ) -> None:
+    if repository_token not in _repository_cache:
+        return
+
+    if search_token not in _search_cache:
+        return
+
     _repository_search_cache[repository_token] = search_token
+    _repository_search_cache.move_to_end(repository_token)
 
     while len(_repository_search_cache) > MAX_CACHE_ITEMS:
-        oldest_token = next(iter(_repository_search_cache))
-        del _repository_search_cache[oldest_token]
+        _repository_search_cache.popitem(last=False)
 
 
 def get_repository_search(repository_token: str) -> str | None:
-    return _repository_search_cache.get(repository_token)
+    search_token = _repository_search_cache.get(repository_token)
+
+    if search_token is None:
+        return None
+
+    if repository_token not in _repository_cache:
+        _repository_search_cache.pop(repository_token, None)
+        return None
+
+    if search_token not in _search_cache:
+        _repository_search_cache.pop(repository_token, None)
+        return None
+
+    _repository_search_cache.move_to_end(repository_token)
+    return search_token

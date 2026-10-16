@@ -2,6 +2,7 @@
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 
@@ -62,6 +63,11 @@ class Settings:
                 "BOT_TOKEN is not configured. Check your .env file."
             )
 
+        use_local_bot_api = env_bool(
+            "USE_LOCAL_BOT_API",
+            False,
+        )
+
         local_bot_api_url = os.getenv(
             "LOCAL_BOT_API_URL",
             "http://127.0.0.1:8081",
@@ -70,6 +76,20 @@ class Settings:
         if not local_bot_api_url:
             raise RuntimeError(
                 "LOCAL_BOT_API_URL cannot be empty."
+            )
+
+        parsed_api_url = urlparse(local_bot_api_url)
+
+        if (
+            parsed_api_url.scheme not in {"http", "https"}
+            or not parsed_api_url.hostname
+            or parsed_api_url.username is not None
+            or parsed_api_url.password is not None
+            or parsed_api_url.query
+            or parsed_api_url.fragment
+        ):
+            raise RuntimeError(
+                "LOCAL_BOT_API_URL must be a valid HTTP(S) base URL."
             )
 
         max_download_mb = env_int(
@@ -83,10 +103,7 @@ class Settings:
                 "GITHUB_TOKEN",
                 "",
             ).strip() or None,
-            use_local_bot_api=env_bool(
-                "USE_LOCAL_BOT_API",
-                False,
-            ),
+            use_local_bot_api=use_local_bot_api,
             local_bot_api_url=local_bot_api_url,
             database_path=BASE_DIR / "data" / "jobs.db",
             downloads_dir=BASE_DIR / "downloads",
@@ -108,6 +125,7 @@ settings.database_path.parent.mkdir(
     parents=True,
     exist_ok=True,
 )
+
 settings.downloads_dir.mkdir(
     parents=True,
     exist_ok=True,

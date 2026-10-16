@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS selections (
     job_type TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
 CREATE TABLE IF NOT EXISTS favorites (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
@@ -45,9 +46,18 @@ CREATE TABLE IF NOT EXISTS favorites (
     UNIQUE(user_id, repo_full_name)
 );
 
+CREATE TABLE IF NOT EXISTS search_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    query TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_search_history_user_created
+ON search_history(user_id, created_at);
+
 CREATE INDEX IF NOT EXISTS idx_favorites_user_created
 ON favorites(user_id, created_at);
-
 """
 
 
@@ -278,7 +288,6 @@ async def claim_next_job() -> dict | None:
         return job
 
 
-
 async def finish_job(job_id: int) -> bool:
     async with aiosqlite.connect(settings.database_path) as db:
         cursor = await db.execute(
@@ -311,7 +320,6 @@ async def fail_job(job_id: int, error: str) -> bool:
         return cursor.rowcount == 1
 
 
-
 async def get_queue_size() -> int:
     async with aiosqlite.connect(settings.database_path) as db:
         cursor = await db.execute(
@@ -322,15 +330,15 @@ async def get_queue_size() -> int:
             """
         )
         row = await cursor.fetchone()
-
         return row[0] if row else 0
-
 
 
 MAX_FAVORITES_PER_USER = 20
 
+
 async def add_favorite(user_id: int, repo_full_name: str) -> str:
     repo_full_name = repo_full_name.strip()
+
     if not repo_full_name or repo_full_name.count("/") != 1:
         return "invalid"
 
@@ -339,11 +347,13 @@ async def add_favorite(user_id: int, repo_full_name: str) -> str:
 
         cursor = await db.execute(
             """
-            SELECT 1 FROM favorites
+            SELECT 1
+            FROM favorites
             WHERE user_id = ? AND repo_full_name = ?
             """,
             (user_id, repo_full_name),
         )
+
         if await cursor.fetchone():
             await db.commit()
             return "exists"
@@ -373,13 +383,13 @@ async def is_favorite(user_id: int, repo_full_name: str) -> bool:
     async with aiosqlite.connect(settings.database_path) as db:
         cursor = await db.execute(
             """
-            SELECT 1 FROM favorites
+            SELECT 1
+            FROM favorites
             WHERE user_id = ? AND repo_full_name = ?
             """,
             (user_id, repo_full_name),
         )
         return await cursor.fetchone() is not None
-
 
 
 async def remove_favorite(user_id: int, repo_full_name: str) -> bool:
@@ -408,3 +418,68 @@ async def get_favorites(user_id: int) -> list[str]:
         )
         rows = await cursor.fetchall()
         return [row[0] for row in rows]
+
+
+
+async def add_search_history(user_id: int, query: str) -> None:
+    query = query.strip()[:200]
+
+    if not query:
+        return
+
+    async with aiosqlite.connect(settings.database_path) as db:
+        await db.execute("BEGIN IMMEDIATE")
+
+        await db.execute(
+            """
+            INSERT INTO search_history (user_id, query)
+            VALUES (?, ?)
+            """,
+            (user_id, query),
+        )
+
+        # فقط ۲۰ جست‌وجوی جدیدتر هر کاربر نگه داشته می‌شود.
+        await db.execute(
+            """
+            DELETE FROM search_history
+            WHERE user_id = ?
+              AND id NOT IN (
+                  SELECT id
+                  FROM search_history
+                  WHERE user_id = ?
+                  ORDER BY id DESC
+                  LIMIT 20
+              )
+            """,
+            (user_id, user_id),
+        )
+
+        await db.commit()
+
+
+
+async def get_search_history(
+    user_id: int,
+    limit: int = 20,
+) -> list[dict]:
+    async with aiosqlite.connect(settings.database_path) as db:
+        cursor = await db.execute(
+            """
+            SELECT id, query, created_at
+            FROM search_history
+            WHERE user_id = ?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (user_id, limit),
+        )
+        rows = await cursor.fetchall()
+
+    return [
+        {
+            "id": row[0],
+            "query": row[1],
+            "created_at": row[2],
+        }
+        for row in rows
+    ]

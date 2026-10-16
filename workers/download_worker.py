@@ -26,8 +26,11 @@ class ProgressInputFile(InputFile):
         filename: str,
         progress_callback: UploadProgress,
         chunk_size: int = 64 * 1024,
-    ):
-        super().__init__(filename=filename, chunk_size=chunk_size)
+    ) -> None:
+        super().__init__(
+            filename=filename,
+            chunk_size=chunk_size,
+        )
         self.path = Path(path)
         self.progress_callback = progress_callback
 
@@ -65,7 +68,7 @@ def make_progress_bar(
 
 
 async def process_download_job(bot: Bot, job: dict) -> None:
-    path = None
+    path: Path | None = None
     progress_message = None
 
     try:
@@ -164,7 +167,7 @@ async def process_download_job(bot: Bot, job: dict) -> None:
 
         if size > max_size:
             raise ValueError(
-                f"File exceeds the configured download limit "
+                "File exceeds the configured download limit "
                 f"of {max_size / (1024 * 1024):.0f} MB."
             )
 
@@ -198,7 +201,11 @@ async def process_download_job(bot: Bot, job: dict) -> None:
 
             last_upload_update = now
 
-            percent = min(100.0, uploaded * 100 / size) if size else 100.0
+            percent = (
+                min(100.0, uploaded * 100 / size)
+                if size
+                else 100.0
+            )
             uploaded_mb = uploaded / (1024 * 1024)
             total_mb = size / (1024 * 1024)
             speed_mb = upload_speed / (1024 * 1024)
@@ -278,7 +285,9 @@ async def worker_loop(
         try:
             job = await claim_next_job()
         except Exception:
-            logger.exception("Could not claim the next download job")
+            logger.exception(
+                "Could not claim the next download job"
+            )
 
             try:
                 await asyncio.wait_for(
@@ -311,7 +320,10 @@ async def worker_loop(
             )
 
             try:
-                marked_failed = await fail_job(job["id"], str(exc))
+                marked_failed = await fail_job(
+                    job["id"],
+                    str(exc),
+                )
 
                 if not marked_failed:
                     logger.warning(
